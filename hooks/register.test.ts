@@ -1,7 +1,7 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { SessionUsage } from 'claude-code'
 
-import { allocate, compact } from './cells'
+import { allocate, compact, easeOut, fit, paint, percent, wrapRows } from './cells'
 
 const row = (name: string, tokens: number, color: string, kind: 'used' | 'free' | 'buffer' | 'deferred') => ({
   name,
@@ -46,6 +46,15 @@ const HINT = {
   viewport: { columns: 64, rows: 24, docksPane: false },
 } as const
 
+const THEME = {
+  key: 'theme',
+  label: 'Theme',
+  kind: 'choice',
+  value: 'dark',
+  provider: { plugin: 'engine', tier: 'core' },
+  isLocked: false,
+} as const
+
 const TOGGLE = {
   command: 'context-bar',
   args: '',
@@ -64,12 +73,67 @@ test('allocate fills the width and keeps tiny categories visible', () => {
 
 test('compact formats token counts', () => {
   expect(compact(999)).toBe('999')
+  expect(compact(3_400)).toBe('3.4k')
+  expect(compact(4_000)).toBe('4k')
   expect(compact(56_000)).toBe('56k')
   expect(compact(1_000_000)).toBe('1M')
 })
 
-test('the bar draws under the prompt, above the hint line, one coloured run per category and /context-bar toggles it', async ($, on) => {
+test('percent keeps a decimal under one percent', () => {
+  expect(percent(3_400, 1_000_000)).toBe('0.3%')
+  expect(percent(100, 1_000_000)).toBe('0.1%')
+  expect(percent(60_000, 200_000)).toBe('30%')
+  expect(percent(0, 200_000)).toBe('0%')
+  expect(percent(5, 0)).toBe('0%')
+})
+
+test('paint draws a full block per cell and a half block where two colours meet', () => {
+  expect(paint(['a', 'a', 'a', 'a', 'a', 'b', 'b', 'b'])).toEqual([
+    { text: '██', color: 'a' },
+    { text: '▌', color: 'a', backgroundColor: 'b' },
+    { text: '█', color: 'b' },
+  ])
+  expect(paint(['a', 'b', 'c', 'c'])).toEqual([
+    { text: '▌', color: 'a', backgroundColor: 'b' },
+    { text: '█', color: 'c' },
+  ])
+  expect(paint([])).toEqual([])
+})
+
+test('easeOut runs from 0 to 1, fastest at the start', () => {
+  expect(easeOut(0)).toBe(0)
+  expect(easeOut(1)).toBe(1)
+  expect(easeOut(0.5)).toBeGreaterThan(0.5)
+})
+
+test('wrapRows counts the rows a wrapping legend takes', () => {
+  expect(wrapRows([], 3, 20)).toBe(0)
+  expect(wrapRows([8, 9], 3, 20)).toBe(1)
+  expect(wrapRows([8, 9, 1], 3, 20)).toBe(2)
+  expect(wrapRows([30], 3, 20)).toBe(1)
+})
+
+test('fit drops the legend, then the box, as the terminal gets shorter', () => {
+  expect(fit(29, 2)).toBe('full')
+  expect(fit(24, 2)).toBe('full')
+  expect(fit(22, 2)).toBe('boxed')
+  expect(fit(22, 1)).toBe('full')
+  expect(fit(20, 1)).toBe('boxed')
+  expect(fit(19, 1)).toBe('bare')
+})
+
+type Drawn = { props: { color?: string; backgroundColor?: string }; children: string[] }
+
+const show = async ($: { command: { run: (e: typeof TOGGLE) => Promise<{ text?: string }> } }) => {
+  if ((await $.command.run(TOGGLE)).text !== 'Context bar shown.') {
+    expect((await $.command.run(TOGGLE)).text).toBe('Context bar shown.')
+  }
+}
+
+test('the box draws under the prompt, above the hint line, and /context-bar toggles it', async ($, on) => {
+  const clock = mock.clock(on)
   on('session.usage', () => ({ value: USAGE }))
+  on('config.list', () => ({ value: [THEME] }))
   on('ui.render', { component: 'PromptHint' }, (_, e) => ({
     type: 'Text',
     props: { dimColor: true },
@@ -77,34 +141,135 @@ test('the bar draws under the prompt, above the hint line, one coloured run per 
   }))
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    const first = await $.command.run(TOGGLE)
-    const wasShown = first.text === 'Context bar shown.'
-
-    if (!wasShown) {
-      expect((await $.command.run(TOGGLE)).text).toBe('Context bar shown.')
-    }
+    await show($)
+    await clock.advance(1000)
 
     const ui = await $.ui.mount({ plugin: 'context-bar', surface, ...HINT })
-    expect(await ui.find({ type: 'Text', text: ' 60k/200k 30%' })).toBeDefined()
 
+    // Header: the total, the window, where compaction starts, and the share used.
+    expect(await ui.find({ type: 'Text', text: '60k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /of 200k · compacts at 167k/ })).toBeDefined()
+    const badge = await ui.find({ type: 'Text', text: /^ 30% $/ })
+    expect((badge?.props as { backgroundColor?: string }).backgroundColor).toBe('success')
+
+    // Bar: 64 columns less the footer's margin and the box's border and padding.
     const bar = await ui.find({ key: 'bar' })
-    const runs = (bar?.children ?? []) as { props: { color?: string }; children: string[] }[]
-    const drawn = runs.slice(0, -1)
-    expect(drawn.map(r => r.props.color)).toEqual(['promptBorder', 'purple', 'subtle', 'inactive'])
-    expect(drawn.map(r => r.children.join('').length).reduce((a, b) => a + b, 0)).toBe(60 - ' 60k/200k 30%'.length)
-    // Every cell of the bar is the same glyph, so no run can sit taller or shorter
-    // than its neighbours whatever the font does with block and shade characters.
-    expect(new Set(drawn.flatMap(r => [...r.children.join('')]))).toEqual(new Set(['█']))
-    const legend = await ui.find({ key: 'legend' })
-    const entries = (legend?.children ?? []) as { children: { children: string[] }[] }[]
-    expect(entries.map(entry => entry.children[0]?.children.join(''))).toEqual(['█', '█', '█'])
+    const runs = (bar?.children ?? []) as Drawn[]
+    const text = runs.map(r => r.children.join('')).join('')
+    expect(text.length).toBe(64 - 4 - 4)
+    // Only block glyphs that fill the cell's height: no shade characters, whose
+    // height differs from the full block's in some fonts.
+    expect(text).toMatch(/^[█▌▏]+$/)
     expect(await ui.findAll({ type: 'Text', text: /[░▒▓]/ })).toHaveLength(0)
 
-    expect(await ui.find({ type: 'Text', text: /Messages 56k/ })).toBeDefined()
+    // System prompt, Messages, free space, then the mark and the buffer.
+    const colors = runs.filter(r => r.children.join('').includes('█')).map(r => r.props.color)
+    expect(colors).toEqual(['#88a5d4', '#d97757', '#3a3e4b', '#1f1c23'])
+    const mark = runs.find(r => r.children.join('') === '▏')
+    expect(mark?.props).toMatchObject({ color: '#e6c86f', backgroundColor: '#1f1c23' })
+    // 33k of 200k is 9 of 56 cells: the mark and eight more.
+    expect(runs[runs.length - 1]?.children.join('')).toBe('█'.repeat(8))
+
+    // Legend: each used category with its share, then the free space.
+    const legend = await ui.find({ key: 'legend' })
+    const entries = (legend?.children ?? []) as { children: { children: string[] }[] }[]
+    expect(entries.map(entry => entry.children.map(part => part.children.join('')).join(''))).toEqual([
+      '■ system prompt 4k 2%',
+      '■ messages 56k 28%',
+      '■ free 107k',
+    ])
     expect(await ui.find({ type: 'Text', text: /deferred/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: '? for shortcuts' })).toBeDefined()
     await ui.unmount()
 
     expect((await $.command.run(TOGGLE)).text).toBe('Context bar hidden.')
+    const hidden = await $.ui.mount({ plugin: 'context-bar', surface, ...HINT })
+    expect(await hidden.find({ key: 'bar' })).toBeUndefined()
+    expect(await hidden.find({ type: 'Text', text: '? for shortcuts' })).toBeDefined()
+    await hidden.unmount()
   }
+})
+
+test('the bar grows from empty when shown and settles on the real values', async ($, on) => {
+  const clock = mock.clock(on)
+  on('session.usage', () => ({ value: USAGE }))
+  on('config.list', () => ({ value: [THEME] }))
+  on('ui.render', { component: 'PromptHint' }, () => ({ type: 'Text', props: {}, children: [''] }))
+
+  const header = async () => {
+    const ui = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...HINT })
+    const head = await ui.find({ key: 'head' })
+    const right = (head?.children ?? [])[1] as { children: { children: string[] }[] }
+    const bar = await ui.find({ key: 'bar' })
+    const runs = (bar?.children ?? []) as Drawn[]
+    const filled = runs
+      .filter(r => r.props.color === '#d97757')
+      .map(r => r.children.join('').length)
+      .reduce((a, b) => a + b, 0)
+    const legend = await ui.find({ type: 'Text', text: '56k' })
+    await ui.unmount()
+
+    return { used: right.children[0]?.children.join('') ?? '', filled, hasLegend: legend !== undefined }
+  }
+
+  await show($)
+
+  // Nothing has moved yet: an empty bar, while the legend already has the totals.
+  const start = await header()
+  expect(start.used).toBe('0')
+  expect(start.filled).toBe(0)
+  expect(start.hasLegend).toBe(true)
+
+  // Part of the way there after a few frames.
+  await clock.advance(40 * 3)
+  const mid = await header()
+  expect(mid.filled).toBeGreaterThan(0)
+  expect(mid.used).not.toBe('0')
+  expect(mid.used).not.toBe('60k')
+
+  // Settled once the twelve frames have run, and still there later.
+  await clock.advance(40 * 9)
+  const end = await header()
+  expect(end.used).toBe('60k')
+  expect(end.filled).toBeGreaterThanOrEqual(mid.filled)
+  await clock.advance(5000)
+  expect(await header()).toEqual(end)
+
+  expect((await $.command.run(TOGGLE)).text).toBe('Context bar hidden.')
+})
+
+test('a short terminal gets the box without its legend, a shorter one the header and bar alone', async ($, on) => {
+  const clock = mock.clock(on)
+  on('session.usage', () => ({ value: USAGE }))
+  on('config.list', () => ({ value: [THEME] }))
+  on('ui.render', { component: 'PromptHint' }, () => ({ type: 'Text', props: {}, children: [''] }))
+
+  await show($)
+  await clock.advance(1000)
+
+  const draw = async (rows: number) => {
+    const ui = await $.ui.mount({
+      plugin: 'context-bar',
+      surface: 'terminal',
+      ...HINT,
+      viewport: { ...HINT.viewport, rows },
+    })
+    const bar = await ui.find({ key: 'bar' })
+    const cells = ((bar?.children ?? []) as Drawn[]).map(r => r.children.join('')).join('').length
+    const shape = {
+      cells,
+      hasHead: (await ui.find({ key: 'head' })) !== undefined,
+      hasLegend: (await ui.find({ key: 'legend' })) !== undefined,
+    }
+    await ui.unmount()
+
+    return shape
+  }
+
+  expect(await draw(24)).toEqual({ cells: 56, hasHead: true, hasLegend: true })
+  expect(await draw(20)).toEqual({ cells: 56, hasHead: true, hasLegend: false })
+  // No border or padding to make room for: the bar takes the whole width.
+  expect(await draw(16)).toEqual({ cells: 60, hasHead: true, hasLegend: false })
+
+  expect((await $.command.run(TOGGLE)).text).toBe('Context bar hidden.')
 })
