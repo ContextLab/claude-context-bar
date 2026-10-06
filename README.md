@@ -6,11 +6,13 @@ A [Claude Code](https://claude.com/claude-code) mod that draws the context windo
 
 - **Header:** tokens used, the window's size, where autocompaction starts, and the share used. The share's badge is green, then yellow from 60% of the way to compaction, then red from 85%.
 - **Bar:** one coloured run per `/context` category, then the free space, a mark where autocompaction starts, and the buffer held back beyond it. Boundaries fall on half cells.
-- **Legend:** each category with its token count and share of the window, then the free space.
+- **Legend:** each category with its token count and share of the window, then the free space and the autocompact buffer.
 
-The bar grows from empty when it appears and slides to its new values when the context changes; each move takes about half a second.
+The bar grows from empty when it appears and slides to its new values when the context changes; each move takes about 0.7 seconds, in steps 20 ms apart.
 
 ![The bar growing in after /context-bar](assets/demo.gif)
+
+The GIF is a 50 frames-per-second screen recording of a real session.
 
 Close-up:
 

@@ -12,8 +12,8 @@ const CHROME = 4
 // Cells between two legend entries.
 const GAP = 3
 // One move of the bar: STEPS frames, FRAME_MS apart.
-const FRAME_MS = 40
-const STEPS = 12
+const FRAME_MS = 20
+const STEPS = 36
 
 // Category colours, by the engine's name for the category; one it gives no
 // entry here keeps the engine's own colour.
@@ -28,8 +28,8 @@ const PALETTE: Record<string, string> = {
 }
 const LABEL: Record<string, string> = { 'system tools': 'tools', 'custom agents': 'agents' }
 const TRACK = {
-  dark: { free: '#3a3e4b', buffer: '#1f1c23' },
-  light: { free: '#d5d8e0', buffer: '#b4b7c2' },
+  dark: { free: '#3a3e4b', buffer: '#7a6a3a' },
+  light: { free: '#d5d8e0', buffer: '#c9b98a' },
 } as const
 const MARK = '#e6c86f'
 
@@ -187,6 +187,16 @@ export const register: Register = on => {
         share: ` ${percent(c.tokens, shot.max)}`,
       })),
       { color: track.free, name: 'free', tokens: compact(shot.free), share: '' },
+      ...(shot.buffer > 0
+        ? [
+            {
+              color: track.buffer,
+              name: 'autocompact buffer',
+              tokens: compact(shot.buffer),
+              share: ` ${percent(shot.buffer, shot.max)}`,
+            },
+          ]
+        : []),
     ]
     // A short terminal clips what is drawn under the prompt from the bottom, so
     // the drawing gives up its legend, then its box, before that happens.
@@ -270,7 +280,7 @@ export const register: Register = on => {
               {entries.map(entry => (
                 <Box>
                   <Text color={entry.color}>■</Text>
-                  <Text dimColor={entry.share === ''}> {entry.name} </Text>
+                  <Text dimColor={entry.name === 'free'}> {entry.name} </Text>
                   <Text bold>{entry.tokens}</Text>
                   <Text dimColor>{entry.share}</Text>
                 </Box>

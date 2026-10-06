@@ -164,9 +164,9 @@ test('the box draws under the prompt, above the hint line, and /context-bar togg
 
     // System prompt, Messages, free space, then the mark and the buffer.
     const colors = runs.filter(r => r.children.join('').includes('█')).map(r => r.props.color)
-    expect(colors).toEqual(['#88a5d4', '#d97757', '#3a3e4b', '#1f1c23'])
+    expect(colors).toEqual(['#88a5d4', '#d97757', '#3a3e4b', '#7a6a3a'])
     const mark = runs.find(r => r.children.join('') === '▏')
-    expect(mark?.props).toMatchObject({ color: '#e6c86f', backgroundColor: '#1f1c23' })
+    expect(mark?.props).toMatchObject({ color: '#e6c86f', backgroundColor: '#7a6a3a' })
     // 33k of 200k is 9 of 56 cells: the mark and eight more.
     expect(runs[runs.length - 1]?.children.join('')).toBe('█'.repeat(8))
 
@@ -177,6 +177,7 @@ test('the box draws under the prompt, above the hint line, and /context-bar togg
       '■ system prompt 4k 2%',
       '■ messages 56k 28%',
       '■ free 107k',
+      '■ autocompact buffer 33k 17%',
     ])
     expect(await ui.find({ type: 'Text', text: /deferred/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: '? for shortcuts' })).toBeDefined()
@@ -221,14 +222,20 @@ test('the bar grows from empty when shown and settles on the real values', async
   expect(start.hasLegend).toBe(true)
 
   // Part of the way there after a few frames.
-  await clock.advance(40 * 3)
+  await clock.advance(20 * 6)
   const mid = await header()
   expect(mid.filled).toBeGreaterThan(0)
   expect(mid.used).not.toBe('0')
   expect(mid.used).not.toBe('60k')
 
-  // Settled once the twelve frames have run, and still there later.
-  await clock.advance(40 * 9)
+  // Still moving at the old half-second mark: the move takes 36 frames of 20 ms.
+  await clock.advance(20 * 19)
+  const late = await header()
+  expect(late.used).not.toBe('60k')
+  expect(late.filled).toBeGreaterThanOrEqual(mid.filled)
+
+  // Settled once all the frames have run, and still there later.
+  await clock.advance(20 * 11)
   const end = await header()
   expect(end.used).toBe('60k')
   expect(end.filled).toBeGreaterThanOrEqual(mid.filled)
