@@ -1,0 +1,13 @@
+{
+  "name": "claude-context-bar",
+  "description": "The context-bar mod for Claude Code: the context window drawn as a stacked bar under the prompt",
+  "owner": {
+    "name": "ContextLab"
+  },
+  "plugins": [
+    {
+      "name": "context-bar",
+      "source": "./"
+    }
+  ]
+}
