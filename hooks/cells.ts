@@ -85,6 +85,24 @@ export const percent = (part: number, whole: number): string => {
   return `${p > 0 && p < 1 ? trim(Math.max(0.1, p), 1) : Math.round(p)}%`
 }
 
+const channels = (hex: string): number[] | undefined => {
+  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex)
+
+  return match ? match.slice(1).map(pair => parseInt(pair, 16)) : undefined
+}
+
+/** The colour `t` of the way from `from` to `to`, both `#rrggbb`; `from` as it is when either is not. */
+export const blend = (from: string, to: string, t: number): string => {
+  const a = channels(from)
+  const b = channels(to)
+
+  if (!a || !b) {
+    return from
+  }
+
+  return `#${a.map((x, i) => Math.round(x + ((b[i] ?? x) - x) * t).toString(16).padStart(2, '0')).join('')}`
+}
+
 /** Fast at first, settling at the end. */
 export const easeOut = (t: number): number => 1 - (1 - t) ** 3
 

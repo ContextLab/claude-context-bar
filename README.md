@@ -2,19 +2,13 @@
 
 A [Claude Code](https://claude.com/claude-code) mod that draws the context window as a stacked bar under the prompt.
 
-![The context bar under the Claude Code prompt](assets/screenshot.png)
+![The context bar growing in under the Claude Code prompt](assets/demo.gif)
 
 - **Header:** tokens used, the window's size, where autocompaction starts, and the share used. The share's badge is green, then yellow from 60% of the way to compaction, then red from 85%.
 - **Bar:** one coloured run per `/context` category, then the free space, a mark where autocompaction starts, and the buffer held back beyond it. Boundaries fall on half cells.
 - **Legend:** each category with its token count and share of the window, then the free space and the autocompact buffer.
 
-The bar grows from empty when it appears and slides to its new values when the context changes; each move takes about 0.7 seconds, in steps 20 ms apart.
-
-![The bar growing in after /context-bar](assets/demo.gif)
-
-The GIF is a 50 frames-per-second screen recording of a real session.
-
-Close-up:
+The bar grows from empty when it appears and slides to its new values when the context changes. While a compaction runs, the messages dim; when it is done, they take their colour back as the bar slides down to what is left.
 
 ![Close-up of the header, bar and legend](assets/bar.png)
 
@@ -30,7 +24,8 @@ Then start a new Claude Code session. The bar appears under the prompt.
 
 ## Use
 
-- The bar updates as the context changes and after each compaction.
+- The bar updates as the context changes.
+- During a compaction (`/compact` or an automatic one) the messages dim, and the bar moves to the compacted size as soon as it is done.
 - `/context-bar` hides the bar; running it again shows it.
 
 The token counts are Claude Code's local estimates (the same summary `/context` starts from), so the mod sends no extra requests.
@@ -51,8 +46,8 @@ The mod is a hooks module with no build step and no dependencies.
 
 | Path | What it holds |
 |-|-|
-| `hooks/register.tsx` | The hooks: the `/context-bar` command, the refresh on context changes, the animation, and the drawing |
-| `hooks/cells.ts` | Splitting the bar's width among categories, half-cell painting, formatting, easing, and fitting the drawing to the terminal's height |
+| `hooks/register.tsx` | The hooks: the `/context-bar` command, the refresh on context changes and compactions, the animation, and the drawing |
+| `hooks/cells.ts` | Splitting the bar's width among categories, half-cell painting, colour blending, formatting, easing, and fitting the drawing to the terminal's height |
 | `hooks/register.test.ts` | Tests |
 | `types/index.d.ts` | The mod's state contract |
 | `.claude-plugin/` | The plugin manifest and the marketplace file that makes this repository installable |

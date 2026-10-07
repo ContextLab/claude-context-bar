@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionContextBreakdown, Timer } from 'claude-code'
 
 import type { Category, Frame, Snapshot } from '../types'
-import { allocate, compact, easeOut, fit, paint, percent, wrapRows } from './cells'
+import { allocate, blend, compact, easeOut, fit, paint, percent, wrapRows } from './cells'
 
 const COMMAND = 'context-bar'
 // Cells the prompt footer keeps clear at its edges.
@@ -14,6 +14,10 @@ const GAP = 3
 // One move of the bar: STEPS frames, FRAME_MS apart.
 const FRAME_MS = 20
 const STEPS = 36
+// After a compaction the engine's count is the old one for a moment: it is
+// asked again every SETTLE_MS, SETTLE_TRIES times at most.
+const SETTLE_MS = 100
+const SETTLE_TRIES = 20
 
 // Category colours, by the engine's name for the category; one it gives no
 // entry here keeps the engine's own colour.
@@ -32,6 +36,8 @@ const TRACK = {
   light: { free: '#d5d8e0', buffer: '#c9b98a' },
 } as const
 const MARK = '#e6c86f'
+// How far the messages go toward the free space's colour during a compaction.
+const DIM = 0.5
 
 const isShown = atom({ plugin: 'context-bar', key: 'isShown' } as const, true)
 const snapshot = atom({ plugin: 'context-bar', key: 'snapshot' } as const, null)
@@ -59,12 +65,13 @@ const toSnapshot = (breakdown: SessionContextBreakdown, isLight: boolean): Snaps
   return { categories, used: breakdown.totalTokens, max: breakdown.rawMaxTokens, free, buffer, isLight }
 }
 
-const toFrame = (shot: Snapshot): Frame => ({
+const toFrame = (shot: Snapshot, dim: number): Frame => ({
   tokens: Object.fromEntries(shot.categories.map(c => [c.name, c.tokens])),
   used: shot.used,
+  dim,
 })
 
-const EMPTY: Frame = { tokens: {}, used: 0 }
+const EMPTY: Frame = { tokens: {}, used: 0, dim: 0 }
 
 const mix = (from: Frame, to: Frame, t: number): Frame => ({
   tokens: Object.fromEntries(
@@ -75,11 +82,15 @@ const mix = (from: Frame, to: Frame, t: number): Frame => ({
     }),
   ),
   used: from.used + (to.used - from.used) * t,
+  dim: (from.dim ?? 0) + (to.dim - (from.dim ?? 0)) * t,
 })
 
 const isSame = (a: Frame, b: Frame): boolean => JSON.stringify(a) === JSON.stringify(b)
 
 let timer: Timer | undefined
+// Whether the main conversation is being compacted now.
+let isCompacting = false
+let settling: Timer | undefined
 
 // Moves the drawn frame from `from` to the snapshot's own values.
 const animate = async ($: EngineInterface, from: Frame, to: Frame) => {
@@ -121,7 +132,39 @@ const refresh = async ($: EngineInterface, motion: 'grow' | 'slide') => {
   const next = toSnapshot(context.breakdown, typeof theme === 'string' && theme.startsWith('light'))
   const drawn = await read($, frame)
   await update($, snapshot, () => next)
-  await animate($, motion === 'grow' || drawn === null ? EMPTY : drawn, toFrame(next))
+  await animate($, motion === 'grow' || drawn === null ? EMPTY : drawn, toFrame(next, isCompacting ? 1 : 0))
+}
+
+// The messages dim while a compaction runs; once it is done they take their
+// colour back as the bar slides to what is left.
+const setCompacting = async ($: EngineInterface, compacts: boolean) => {
+  isCompacting = compacts
+
+  if (await read($, isShown)) {
+    await refresh($, 'slide')
+  }
+}
+
+// The compacted conversation is in place just after the hook returns, and no
+// measurement is raised for it, so the bar waits here for the count to move.
+const settle = async ($: EngineInterface) => {
+  const before = (await read($, snapshot))?.used
+  let tries = 0
+  settling?.cancel()
+
+  const mine = $.clock.every(SETTLE_MS, () => {
+    void (async () => {
+      tries += 1
+      const { context } = await $.session.usage({ breakdown: 'summary' })
+
+      if (settling === mine && (context.breakdown?.totalTokens !== before || tries >= SETTLE_TRIES)) {
+        mine.cancel()
+        settling = undefined
+        await setCompacting($, false)
+      }
+    })()
+  })
+  settling = mine
 }
 
 export const register: Register = on => {
@@ -155,13 +198,28 @@ export const register: Register = on => {
   })
 
   on('session.compact', async ($, e, next) => {
-    const done = await next(e)
-
-    if (await read($, isShown)) {
-      await refresh($, 'slide')
+    // A precompute installs nothing, and a subagent's transcript is not the bar's.
+    if (e.trigger === 'precompute' || e.agentId !== undefined) {
+      return next(e)
     }
 
-    return done
+    settling?.cancel()
+    settling = undefined
+    await setCompacting($, true)
+    let isCompacted = false
+
+    try {
+      const done = await next(e)
+      isCompacted = done.skip === undefined
+
+      return done
+    } finally {
+      if (isCompacted && (await read($, isShown))) {
+        await settle($)
+      } else {
+        await setCompacting($, false)
+      }
+    }
   }).catch((_, e, next) => next(e))
 
   // The hint line is the one site under the prompt box: the bar goes above the
@@ -175,13 +233,15 @@ export const register: Register = on => {
     }
 
     const { Box, Text } = $.ui.resolve(e)
-    const now = (await read($, frame)) ?? toFrame(shot)
+    const now = (await read($, frame)) ?? toFrame(shot, 0)
     const track = shot.isLight ? TRACK.light : TRACK.dark
+    const tint = (c: Category): string =>
+      c.name.toLowerCase() === 'messages' ? blend(c.color, track.free, (now.dim ?? 0) * DIM) : c.color
     const outer = Math.max(24, (e.viewport?.columns ?? 80) - MARGIN)
 
     const entries = [
       ...shot.categories.map(c => ({
-        color: c.color,
+        color: tint(c),
         name: LABEL[c.name.toLowerCase()] ?? c.name.toLowerCase(),
         tokens: compact(c.tokens),
         share: ` ${percent(c.tokens, shot.max)}`,
@@ -215,7 +275,7 @@ export const register: Register = on => {
     const drawn = shot.categories.map(c => now.tokens[c.name] ?? 0)
     const open = Math.max(0, shot.max - shot.buffer - drawn.reduce((sum, t) => sum + t, 0))
     const halves = allocate([...drawn, open], (width - reserve) * 2)
-    const colors = [...shot.categories.map(c => c.color), track.free]
+    const colors = [...shot.categories.map(tint), track.free]
     const runs = paint(halves.flatMap((n, i) => Array<string>(n).fill(colors[i] ?? track.free)))
 
     const limit = shot.max - shot.buffer

@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { SessionUsage } from 'claude-code'
 
-import { allocate, compact, easeOut, fit, paint, percent, wrapRows } from './cells'
+import { allocate, blend, compact, easeOut, fit, paint, percent, wrapRows } from './cells'
 
 const row = (name: string, tokens: number, color: string, kind: 'used' | 'free' | 'buffer' | 'deferred') => ({
   name,
@@ -98,6 +98,14 @@ test('paint draws a full block per cell and a half block where two colours meet'
     { text: '█', color: 'c' },
   ])
   expect(paint([])).toEqual([])
+})
+
+test('blend mixes two hex colours and leaves a theme colour alone', () => {
+  expect(blend('#d97757', '#3a3e4b', 0)).toBe('#d97757')
+  expect(blend('#d97757', '#3a3e4b', 1)).toBe('#3a3e4b')
+  expect(blend('#d97757', '#3a3e4b', 0.5)).toBe('#8a5b51')
+  expect(blend('purple', '#3a3e4b', 0.5)).toBe('purple')
+  expect(blend('#d97757', 'subtle', 0.5)).toBe('#d97757')
 })
 
 test('easeOut runs from 0 to 1, fastest at the start', () => {
@@ -277,6 +285,130 @@ test('a short terminal gets the box without its legend, a shorter one the header
   expect(await draw(20)).toEqual({ cells: 56, hasHead: true, hasLegend: false })
   // No border or padding to make room for: the bar takes the whole width.
   expect(await draw(16)).toEqual({ cells: 60, hasHead: true, hasLegend: false })
+
+  expect((await $.command.run(TOGGLE)).text).toBe('Context bar hidden.')
+})
+
+// The same window after a compaction: the messages are down to 6k.
+const COMPACTED: SessionUsage = {
+  ...USAGE,
+  context: {
+    ...USAGE.context,
+    breakdown: {
+      ...USAGE.context.breakdown!,
+      categories: [
+        row('System prompt', 4_000, 'promptBorder', 'used'),
+        row('Messages', 6_000, 'purple', 'used'),
+        row('Free space', 157_000, 'promptBorder', 'free'),
+        row('Autocompact buffer', 33_000, 'inactive', 'buffer'),
+      ],
+      totalTokens: 10_000,
+    },
+  },
+}
+
+const SUMMARY = { role: 'user' as const, text: 'What was said so far.', toolUses: [] }
+const MESSAGES = '#d97757'
+const DIMMED = '#8a5b51'
+
+test('the messages dim while a compaction runs, then the bar slides to the compacted size', async ($, on) => {
+  const clock = mock.clock(on)
+  let usage = USAGE
+  let finish: (skip?: string) => void = () => {}
+  on('session.usage', () => ({ value: usage }))
+  on('config.list', () => ({ value: [THEME] }))
+  on('ui.render', { component: 'PromptHint' }, () => ({ type: 'Text', props: {}, children: [''] }))
+  on(
+    'session.compact',
+    () => new Promise(resolve => (finish = skip => resolve(skip === undefined ? { messages: [SUMMARY] } : { skip }))),
+  )
+
+  const draw = async () => {
+    const ui = await $.ui.mount({ plugin: 'context-bar', surface: 'terminal', ...HINT })
+    const head = await ui.find({ key: 'head' })
+    const right = (head?.children ?? [])[1] as { children: { children: string[] }[] }
+    const runs = ((await ui.find({ key: 'bar' }))?.children ?? []) as Drawn[]
+    const cells = (color: string) =>
+      runs
+        .filter(r => r.props.color === color)
+        .map(r => r.children.join('').length)
+        .reduce((a, b) => a + b, 0)
+    const legend = await ui.find({ key: 'legend' })
+    const entries = (legend?.children ?? []) as { children: { props: { color?: string }; children: string[] }[] }[]
+    const entry = entries.find(parts => parts.children[1]?.children.join('') === ' messages ')
+    await ui.unmount()
+
+    return {
+      used: right.children[0]?.children.join('') ?? '',
+      bright: cells(MESSAGES),
+      dimmed: cells(DIMMED),
+      swatch: entry?.children[0]?.props.color,
+      count: entry?.children[2]?.children.join(''),
+    }
+  }
+
+  await show($)
+  await clock.advance(1000)
+  const full = await draw()
+  expect(full).toMatchObject({ used: '60k', dimmed: 0, swatch: MESSAGES, count: '56k' })
+  expect(full.bright).toBeGreaterThan(10)
+
+  // Compacting: the messages fade to the colour halfway to the free space's,
+  // in the bar and the legend, and nothing moves.
+  const compacting = $.session.compact({ trigger: 'manual', messages: [SUMMARY] })
+  await clock.advance(20 * 6)
+  const fading = await draw()
+  expect(fading.bright).toBe(0)
+  expect(fading.dimmed).toBe(0)
+  expect(fading.swatch).not.toBe(MESSAGES)
+  await clock.advance(1000)
+  const dim = await draw()
+  expect(dim).toEqual({ used: '60k', bright: 0, dimmed: full.bright, swatch: DIMMED, count: '56k' })
+  // However long the compaction takes.
+  await clock.advance(30_000)
+  expect(await draw()).toEqual(dim)
+
+  // The compaction is done, but the engine's count is the old one for a
+  // moment: the bar holds, dimmed.
+  finish()
+  await compacting
+  await clock.advance(250)
+  expect(await draw()).toEqual(dim)
+
+  // The count moves: the legend has the new size at once, and the bar slides
+  // down to it as the messages take their colour back.
+  usage = COMPACTED
+  await clock.advance(100 + 20 * 6)
+  const sliding = await draw()
+  expect(sliding.count).toBe('6k')
+  expect(sliding.used).not.toBe('60k')
+  expect(sliding.used).not.toBe('10k')
+  await clock.advance(1000)
+  const end = await draw()
+  expect(end).toMatchObject({ used: '10k', dimmed: 0, swatch: MESSAGES, count: '6k' })
+  expect(end.bright).toBeGreaterThan(0)
+  expect(end.bright).toBeLessThan(full.bright)
+  await clock.advance(5000)
+  expect(await draw()).toEqual(end)
+
+  // A compaction that is skipped leaves the bar as it was, at full colour.
+  const skipped = $.session.compact({ trigger: 'manual', messages: [SUMMARY] })
+  await clock.advance(1000)
+  expect((await draw()).dimmed).toBe(end.bright)
+  finish('nothing to compact')
+  await skipped
+  await clock.advance(1000)
+  expect(await draw()).toEqual(end)
+
+  // A count that never moves does not leave the messages dimmed.
+  const same = $.session.compact({ trigger: 'manual', messages: [SUMMARY] })
+  await clock.advance(1000)
+  finish()
+  await same
+  await clock.advance(1000)
+  expect((await draw()).dimmed).toBe(end.bright)
+  await clock.advance(2000)
+  expect(await draw()).toEqual(end)
 
   expect((await $.command.run(TOGGLE)).text).toBe('Context bar hidden.')
 })

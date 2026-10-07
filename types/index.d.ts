@@ -11,8 +11,11 @@ export type Snapshot = {
   isLight: boolean
 }
 
-/** What the bar draws this frame, on its way to the snapshot. */
-export type Frame = { tokens: Record<string, number>; used: number }
+/**
+ * What the bar draws this frame, on its way to the snapshot. `dim` runs from 0
+ * to 1 as the messages darken for a compaction.
+ */
+export type Frame = { tokens: Record<string, number>; used: number; dim: number }
 
 declare module 'claude-code' {
   interface PluginState {

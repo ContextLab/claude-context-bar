@@ -1,6 +1,6 @@
 {
   "name": "context-bar",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Draws the context window as a stacked bar under the prompt, one colour per /context category, with a legend and a compaction mark; /context-bar toggles it",
   "author": {
     "name": "Jeremy Manning"
